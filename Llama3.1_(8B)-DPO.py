@@ -56,11 +56,21 @@ dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for
 load_in_4bit = True # Use 4bit quantization to reduce memory usage. Can be False.
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name = "unsloth/zephyr-sft-bnb-4bit", # Choose ANY! eg mistralai/Mistral-7B-Instruct-v0.2
+    model_name = "unsloth/Meta-Llama-3.1-8B-Instruct",
     max_seq_length = max_seq_length,
     dtype = dtype,
     load_in_4bit = load_in_4bit,
     # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
+)
+
+
+# In[ ]:
+
+
+from unsloth.chat_templates import get_chat_template
+tokenizer = get_chat_template(
+    tokenizer,
+    chat_template = "llama-3.1",
 )
 
 
@@ -76,14 +86,11 @@ from datasets import DatasetDict, concatenate_datasets, load_dataset, load_from_
 from datasets.builder import DatasetGenerationError
 
 
-DEFAULT_CHAT_TEMPLATE = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}"
-
-
 def apply_chat_template(
     example,
     tokenizer,
     task: Literal["sft", "generation", "rm", "dpo"] = "sft",
-    assistant_prefix="<|assistant|>\n",
+    assistant_prefix="<|start_header_id|>assistant<|end_header_id|>\n\n",
 ):
     def _strip_prefix(s, pattern):
         # Use re.escape to escape any special characters in the pattern
@@ -261,7 +268,7 @@ def mix_datasets(
 
 # <a name="Data"></a>
 # ### Data Prep
-# We follow Huggingface's [Alignment Handbook](https://github.com/huggingface/alignment-handbook) for [Zephyr](https://huggingface.co/HuggingFaceH4/zephyr-7b-beta) and use the [Ultra Feedback dataset](https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized), and sample 0.5% of it to speed things up. You can sample the full dataset for a full run.
+# We follow Huggingface's [Alignment Handbook](https://github.com/huggingface/alignment-handbook) and use the [Ultra Feedback dataset](https://huggingface.co/datasets/HuggingFaceH4/ultrafeedback_binarized), and sample 0.5% of it to speed things up. You can sample the full dataset for a full run.
 
 # In[ ]:
 
@@ -272,9 +279,10 @@ raw_datasets = get_datasets(
 )
 column_names = list(raw_datasets["train"].features)
 
+# Llama 3.1 assistant prefix format
 raw_datasets = raw_datasets.map(
     apply_chat_template,
-    fn_kwargs = {"tokenizer": tokenizer, "task": "dpo"},
+    fn_kwargs = {"tokenizer": tokenizer, "task": "dpo", "assistant_prefix": "<|start_header_id|>assistant<|end_header_id|>\n\n"},
     num_proc = 12,
     remove_columns = column_names,
     desc = "Formatting comparisons with prompt template",
@@ -369,6 +377,48 @@ dpo_trainer = DPOTrainer(
 
 
 dpo_trainer.train()
+
+
+# <a name="Save"></a>
+# ### Saving
+# Save the LoRA adapters locally. To save to 16bit or GGUF, see the [Unsloth documentation](https://docs.unsloth.ai/).
+
+# In[ ]:
+
+
+# Check if running in Google Colab
+import os
+if "COLAB_RELEASE_TAG" in os.environ:
+    from google.colab import drive
+    drive.mount('/content/drive')
+    save_path = "/content/drive/MyDrive/lora_model"
+else:
+    save_path = "lora_model"
+
+model.save_pretrained(save_path)
+tokenizer.save_pretrained(save_path)
+print(f"Model saved to {save_path}")
+# model.push_to_hub("your_name/lora_model", token = "...") # Online saving
+# tokenizer.push_to_hub("your_name/lora_model", token = "...") # Online saving
+
+
+# <a name="Inference"></a>
+# ### Inference
+# Run inference on the locally trained model.
+
+# In[ ]:
+
+
+from transformers import TextStreamer
+FastLanguageModel.for_inference(model)  # Enable native 2x faster inference
+
+messages = [
+    {"role": "user", "content": "How can I develop a habit of drawing daily?"},
+]
+inputs = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to("cuda")
+
+text_streamer = TextStreamer(tokenizer)
+_ = model.generate(input_ids=inputs, streamer=text_streamer, max_new_tokens=256, use_cache=True)
 
 
 # And we're done! If you have any questions on Unsloth, we have a [Discord](https://discord.gg/unsloth) channel! If you find any bugs or want to keep updated with the latest LLM stuff, or need help, join projects etc, feel free to join our Discord!
